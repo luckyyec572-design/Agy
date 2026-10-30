@@ -18,7 +18,7 @@ from test_gateway import FAKE
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         binary = self.root/'agy'; binary.write_text(FAKE); binary.chmod(0o700)
         self.gateway = Gateway(self.root/'data', 'test-key-'*6, str(binary), [self.root])
 
@@ -68,8 +68,49 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse((a/'.gemini/antigravity-cli/antigravity-oauth-token').exists())
         hook = json.loads((a/'.gemini/config/hooks.json').read_text())
         self.assertEqual(hook['agy-iphone-native-review']['PreToolUse'][0]['hooks'][0]['timeout'], 600)
-        self.assertEqual(profiles.environment(a)['HOME'], str(a))
+        self.assertEqual(profiles.environment(a)['HOME'], str(a.resolve()))
         with self.assertRaises(ValueError): profiles.prepare(Path.home())
+
+    def test_artifacts_accept_root_ancestor_alias_without_resolving_children(self):
+        s = self.gateway.create({})
+        expected = b'\x00\xffmacOS root alias'
+        file = self.root/'中文 空格.bin'; file.write_bytes(expected)
+        # Reproduce /var -> /private/var on every platform. The alias is
+        # outside the permitted workspace, before its security boundary.
+        with tempfile.TemporaryDirectory() as alias_directory:
+            alias = Path(alias_directory).resolve()/'var'
+            alias.symlink_to(self.root.parent, target_is_directory=True)
+            lexical_root = alias/self.root.name
+            stream, name, size = self.gateway.open_file(s['id'], str(lexical_root/file.name))
+            with stream: self.assertEqual(stream.read(), expected)
+            self.assertEqual(name, file.name); self.assertEqual(size, len(expected))
+            inside = self.root/'inside'; inside.mkdir()
+            (inside/'file.bin').write_bytes(expected)
+            (self.root/'directory-link').symlink_to(inside, target_is_directory=True)
+            # An alias before the workspace must NOT bypass no-follow for
+            # links at or after the workspace boundary.
+            with self.assertRaises(Failure):
+                self.gateway.open_file(s['id'], str(lexical_root/'directory-link/file.bin'))
+            (inside/'back-to-root').symlink_to(self.root, target_is_directory=True)
+            subdirectory_alias = Path(alias_directory).resolve()/'subdirectory'
+            subdirectory_alias.symlink_to(inside, target_is_directory=True)
+            with self.assertRaises(Failure):
+                self.gateway.open_file(s['id'], str(subdirectory_alias/'back-to-root'/file.name))
+
+    def test_artifacts_reject_directory_links_and_lexical_parent_traversal(self):
+        s = self.gateway.create({})
+        inside = self.root/'inside'; inside.mkdir()
+        (inside/'file.bin').write_bytes(b'inside')
+        (self.root/'directory-link').symlink_to(inside, target_is_directory=True)
+        with self.assertRaises(Failure):
+            self.gateway.open_file(s['id'], str(self.root/'directory-link/file.bin'))
+        with self.assertRaises(Failure):
+            self.gateway.open_file(s['id'], str(self.root/'directory-link/../inside/file.bin'))
+        with tempfile.TemporaryDirectory() as outside:
+            (Path(outside)/'file.bin').write_bytes(b'outside')
+            (self.root/'outside-link').symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(Failure):
+                self.gateway.open_file(s['id'], str(self.root/'outside-link/file.bin'))
 
 
 class ApprovalTests(unittest.TestCase):

@@ -449,17 +449,40 @@ class Gateway:
     def open_file(self, sid, raw):
         s = self.get(sid)
         cwd = Path(self.workspace(s["cwd"]))
-        target = Path(raw) if Path(raw).is_absolute() else cwd / raw
+        requested = Path(raw)
+        if ".." in requested.parts:
+            raise Failure(403, "文件路径不能包含父目录跳转")
+        target = requested if requested.is_absolute() else cwd / requested
         allowed = [cwd]
         if self.profile_home and s["conversationID"]:
             allowed.append(self.profile_home/".gemini/antigravity-cli/brain"/s["conversationID"])
         target = Path(os.path.abspath(target))
-        base = next((r for r in allowed if target != r and r in target.parents), None)
+        base, components = None, None
+        for root in allowed:
+            if root in target.parents:
+                base, components = root, target.relative_to(root).parts
+                break
+            # macOS may spell the same root /var/... and /private/var/....
+            # Resolve only a ROOT prefix, from outermost to innermost. Once
+            # inside that boundary, preserve every child for O_NOFOLLOW.
+            # Resolving target itself would silently accept workspace links.
+            for prefix in reversed(target.parents):
+                try:
+                    canonical = prefix.resolve(strict=True)
+                except (OSError, RuntimeError):
+                    continue
+                if canonical == root:
+                    base, components = root, target.relative_to(prefix).parts
+                    break
+                if root in canonical.parents:
+                    # We already entered the boundary via a subdirectory.
+                    # Do not follow more aliases to manufacture a root match.
+                    break
+            if base is not None: break
         if base is None: raise Failure(403, "文件不在此会话的允许范围")
         descriptors = []
         try:
             fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW); descriptors.append(fd)
-            components = target.relative_to(base).parts
             for part in components[:-1]:
                 fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd); descriptors.append(fd)
             result = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)

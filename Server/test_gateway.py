@@ -37,7 +37,7 @@ print(json.dumps({"event":"result","result":{"status":"SUCCESS","response":"ф╜ах
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         fake = self.root / "agy"
         fake.write_text(FAKE)
         fake.chmod(0o700)
