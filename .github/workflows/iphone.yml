@@ -1,0 +1,46 @@
+name: AGY iPhone IPA
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: agy-iphone-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package:
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test gateway admission, recovery, authentication and streaming
+        run: python3 -m unittest discover -s Server -v
+      - name: Test native protocol and Markdown
+        run: |
+          mkdir -p build
+          xcrun swiftc -parse-as-library Sources/NativeCore.swift Tests/NativeCoreTests.swift -o build/native-core
+          build/native-core
+      - name: Test document and photo attachment imports
+        run: |
+          xcrun swiftc -parse-as-library Sources/NativeAttachmentReader.swift Sources/NativePhotoEncoding.swift Tests/NativeAttachmentTests.swift -o build/native-attachments
+          build/native-attachments
+      - name: Generate Xcode project
+        run: python3 scripts/generate-project.py
+      - name: Archive and verify physical iPhone IPA
+        run: bash scripts/package.sh
+      - name: Upload IPA
+        uses: actions/upload-artifact@v6
+        with:
+          name: AGY-iPhone-resign
+          path: |
+            dist/AGY-iPhone-resign.ipa
+            dist/build-manifest.json
+            dist/official-icon.png
+          if-no-files-found: error
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: AGY-build-log
+          path: dist/build.log

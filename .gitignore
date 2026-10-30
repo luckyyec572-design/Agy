@@ -1,0 +1,10 @@
+build/
+dist/
+Reference/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+*.ipa
+Tests/output/
+__pycache__/
+*.pyc

@@ -1,0 +1,62 @@
+import Foundation
+
+@main struct NativeCoreTests {
+    static func main() throws {
+        var checks = 0
+        func check(_ condition: Bool, _ label: String) {
+            precondition(condition, label); checks += 1
+        }
+        var parser = SSEParser()
+        check(try parser.consume(": heartbeat") == nil, "SSE heartbeat")
+        check(try parser.consume("event: message") == nil, "SSE event field")
+        check(try parser.consume("data: 第一行") == nil, "SSE accumulates")
+        check(try parser.consume("data:第二行\r") == nil, "SSE CRLF")
+        check(try parser.consume("") == "第一行\n第二行", "SSE multiline Unicode")
+        check(try parser.consume("") == nil, "SSE reset")
+        var live = LiveTranscript()
+        func event(_ text: String) throws { _ = live.ingest(try WireValue.parse(text)) }
+        try event(#"{"type":"connected","isStreaming":true}"#)
+        check(live.running, "Reconnect resumes active run")
+        try event(#"{"type":"message_start","message":{"role":"assistant","timestamp":123,"content":[]}}"#)
+        try event(#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1}}"#)
+        try event(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"你好"}}"#)
+        try event(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"，Pi"}}"#)
+        check(live.message?.text == "你好，Pi", "Unicode streaming deltas")
+        try event(#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"思考完成"}}"#)
+        check(live.message?.content.first?["type"].string == "thinking", "Ordered content indices")
+        try event(#"{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"完整权威文本"}}"#)
+        check(live.message?.text == "完整权威文本", "Block end repairs dropped deltas")
+        try event(#"{"type":"tool_execution_start","toolCallId":"t1","toolName":"read"}"#)
+        check(live.tools["t1"] == "read", "Tool start")
+        try event(#"{"type":"tool_execution_end","toolCallId":"t1","isError":false}"#)
+        check(live.tools.isEmpty, "Tool cleanup")
+        try event(#"{"type":"agent_end"}"#)
+        check(live.running, "Agent end must not stop logical prompt during retries")
+        let final = live.ingest(try WireValue.parse(#"{"type":"message_end","message":{"role":"assistant","timestamp":123,"content":[{"type":"text","text":"最终答案"}]}}"#))
+        check(final?.text == "最终答案" && live.message == nil, "Authoritative final message replaces partial")
+        try event(#"{"type":"prompt_done"}"#)
+        check(!live.running, "Prompt completion")
+        let context = try WireValue.parse(#"{"entryIds":["s","u","a"],"messages":[{"role":"system","content":"private instructions"},{"role":"user","content":"你好"},{"role":"assistant","content":[{"type":"text","text":"您好"}]}]}"#)
+        let history = ChatMessage.history(context)
+        check(history.count == 2 && history[0].id == "u", "History filters system but preserves entry ids")
+        check(history[0].text == "你好", "String user content")
+        check(history[1].text == "您好", "Block assistant content")
+        let markdown = MarkdownBlock.parse("开头\n```swift\nlet x = 1\n```\n| A | B |\n| --- | :---: |\n| 一 | 二 |")
+        check(markdown.count == 3, "Markdown blocks")
+        check(markdown[1] == .code("swift", "let x = 1"), "Code stays verbatim")
+        check(markdown[2] == .table([["A", "B"], ["一", "二"]]), "Native table structure")
+        check(MarkdownBlock.parse("```\npartial") == [.code("", "partial")], "Unclosed streaming fence")
+        let value = try WireValue.parse(#"{"future":{"nested":[true,null,1,"x"]},"huge":1e50}"#)
+        check(try JSONDecoder().decode(WireValue.self, from: JSONEncoder().encode(value)) == value, "Unknown fields roundtrip")
+        check(value["huge"].int == 0, "Untrusted integer overflow")
+        check(live.ingest(try WireValue.parse(#"{"type":"future_event","data":42}"#)) == nil, "Unknown events ignored")
+        try event(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"late ghost"}}"#)
+        check(live.message == nil, "Late buffered deltas do not resurrect a completed reply")
+        let normalized = ChatMessage(id: "image", value: try WireValue.parse(#"{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]}"#))
+        check(normalized.content[0]["data"].string == "aGVsbG8=", "Historical image source format")
+        let tool = ChatMessage(id: "tool", value: try WireValue.parse(#"{"role":"assistant","content":[{"type":"toolCall","toolCallId":"1","toolName":"read","input":{"path":"README.md"}}]}"#))
+        check(tool.content[0]["arguments"]["path"].string == "README.md", "Historical normalized tool arguments")
+        check(tool.content[0]["name"].string == "read", "Historical normalized tool name")
+        print("Passed \(checks) native protocol/rendering checks")
+    }
+}
