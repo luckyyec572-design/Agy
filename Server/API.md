@@ -68,4 +68,21 @@ The gateway stores files under the session workspace's `.agy-uploads/{session}/`
 
 Reusing a message request ID with the same text and upload IDs returns the originally admitted message without re-executing it. A different payload under that ID returns 409. Uploads by themselves never invoke a model. Gateway history deletion preserves AGY's own original conversation and its referenced files.
 
-Existing session GET, SSE events, stop and delete endpoints preserve their response shape with optional new fields. Directory browsing/management, arbitrary TUI interactions and the official Remote Control history are not part of this API.
+Existing session GET, SSE events, stop and delete endpoints preserve their response shape with optional new fields. Arbitrary TUI interactions and the official Remote Control history are not part of this API. Directory browsing and mentions are provided by the 1.3.0 endpoints below.
+
+
+## Phone file browser and file/folder mentions (1.3.0)
+
+Status capabilities `fileBrowser` and `directoryMentions` advertise the matching backend. The native app reports that deployment is required if these capabilities are absent.
+
+- `GET /v1/workspace?cwd=<allowed-workspace>&path=<relative-directory>` browses before creating a session. `cwd` must resolve inside a configured root. The phone uses this for selecting a project folder, without typing a server path.
+- `GET /v1/sessions/{sid}/entries?scope=workspace|uploads|artifacts&path=<relative-directory>` lists the session workspace, its uploads, or its isolated AGY brain artifacts. Missing uploads/artifacts return an empty list. Artifacts do not include another conversation's brain directory. Shared project files remain shared within a workspace.
+- Responses: `{"root":"/server/project","path":"资料","entries":[{"name":"合同.pdf","path":"/server/project/资料/合同.pdf","directory":false,"size":12,"modified":1793000000.0}]}`. The phone displays only relative labels. Folders sort first; the phone can filter names, show hidden entries, sort by modification date, and navigate back to root.
+- Directory traversal, links and special filesystem entries are refused. Credential/configuration directories are excluded. Listing is limited to 5000 entries per directory. Downloads retain the 25 MiB per-file limit. Directory download/ZIP creation, delete/rename and moving files are not exposed.
+- Upload from Files or Photos uses the existing binary attachment endpoint immediately, without sending a task. Upload names in the browser retain their original names; generated storage names prevent overwrites. A batch selects up to 8 files; the 50 MiB total applies when sending uploaded attachments in a single chat message.
+- `POST /v1/sessions/{sid}/messages` additionally accepts `"references":["/server/project/src","/server/project/资料/合同.pdf"]`. Up to 8 distinct file/folder references are accepted; references alone can form a message. The server validates every path with no-follow directory traversal before admitting the request. Unavailable/forbidden paths fail without adding a user message. Request deduplication covers the reference list as well as text and upload IDs.
+- A folder is one reference with MIME `inode/directory`, not a ZIP or recursively pasted contents. The headless prompt passes the full selected paths and their file/directory types as explicit context records. Names and paths are JSON-escaped, preserving spaces, Unicode and literal control characters without creating fake context records. Permission checks still apply when AGY reads these paths.
+
+The phone opens the picker on a trailing `@`, or via “@ 引用工作文件”. Rows offer navigation/preview and a separate `@` action, including whole-folder references and a current-folder action. Draft reference chips show relative paths, survive reopening a session, and are included in the keychain-protected pending-send payload. An account change clears them with other account caches.
+
+Reference semantics follow [Google's official mentions documentation](https://antigravity.google/docs/at-mentions): paths identify context, and contents are read when needed. This headless integration does not implement the TUI's interactive suggestion protocol or a private binary mention format.

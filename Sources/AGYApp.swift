@@ -20,6 +20,7 @@ struct AGYRoot: View {
             if store.connected {
                 TabView(selection: $store.tab) {
                     AGYChat().tag(0).tabItem { Label("对话", systemImage: "bubble.left.and.bubble.right") }
+                    AGYFiles().tag(3).tabItem { Label("文件", systemImage: "folder") }
                     AGYHistory().tag(1).tabItem { Label("历史", systemImage: "clock") }
                     AGYSettings().tag(2).tabItem { Label("设置", systemImage: "gearshape") }
                 }
@@ -94,6 +95,7 @@ struct AGYChat: View {
     @State private var following = true
     @State private var jumpToLatest = 0
     @AppStorage("nativeOutputMode") private var outputMode = NativeOutputMode.original.rawValue
+    @State private var showFiles = false
     @State private var attachmentPicker: AGYAttachmentPicker?
     @State private var pickerContext = UUID()
     @FocusState private var composerFocused: Bool
@@ -146,6 +148,9 @@ struct AGYChat: View {
                 ToolbarItem(placement: .topBarLeading) { Button { showConfiguration = true } label: { Image(systemName: "slider.horizontal.3").frame(width: 36, height: 36) }.accessibilityLabel("模型和工作目录") }
                 ToolbarItem(placement: .topBarTrailing) { Button { store.newConversation() } label: { Image(systemName: "square.and.pencil").frame(width: 36, height: 36) }.accessibilityLabel("新建对话").disabled(store.busy || store.pending != nil) }
             }
+            .sheet(isPresented: $showFiles) {
+                AGYFiles(picking: true).presentationDetents([.medium, .large]).presentationDragIndicator(.visible)
+            }
             .sheet(isPresented: $showConfiguration) { AGYConfiguration() }
             .sheet(item: $attachmentPicker) { picker in
                 if picker == .photos {
@@ -164,6 +169,21 @@ struct AGYChat: View {
     }
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if !store.references.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(store.references) { entry in
+                            HStack {
+                                Text("@ " + entry.name).font(.caption)
+                                Button { store.references.removeAll { $0.id == entry.id }; store.saveDraft() } label: { Image(systemName: "xmark.circle.fill") }
+                                    .accessibilityLabel("移除引用 " + entry.name).disabled(store.busy || store.pending != nil)
+                            }.padding(10).background(NativeTheme.surface, in: Capsule())
+                        }
+                    }
+                }
+            }
+            Button { showFiles = true } label: { Label("@ 引用工作文件", systemImage: "at").font(.caption) }
+                .disabled(store.busy || store.pending != nil)
             if !store.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
@@ -214,7 +234,10 @@ struct AGYChat: View {
                 }
             }.padding(10).background(NativeTheme.composer, in: RoundedRectangle(cornerRadius: 22)).overlay(RoundedRectangle(cornerRadius: 22).stroke(NativeTheme.border, lineWidth: 1))
         }.padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 10).background(NativeTheme.canvas)
-            .onChange(of: store.draft) { _, _ in store.saveDraft() }
+            .onChange(of: store.draft) { old, value in
+                store.saveDraft()
+                if AGYFilePresentation.opensMention(old: old, new: value), !store.busy, store.pending == nil { showFiles = true }
+            }
     }
 }
 enum AGYAttachmentPicker: String, Identifiable { case photos, files; var id: String { rawValue } }
@@ -251,7 +274,8 @@ struct AGYConfiguration: View {
                     Text("执行方式决定先计划还是直接工作；审批策略单独控制工具是否需要你确认。").font(.footnote).foregroundStyle(.secondary)
                 }.disabled(store.busy || store.selected?.running == true || !store.gatewayReady)
                 Section("工作空间") {
-                    Picker("目录", selection: $store.cwd) { ForEach(store.roots, id: \.self) { Text($0).tag($0) } }
+                    Text(URL(fileURLWithPath: store.cwd).lastPathComponent).font(.caption)
+                    NavigationLink("浏览并选择项目目录") { AGYWorkspacePicker() }
                     if store.selected != nil { Text("工作目录在新建会话时设置。").font(.footnote).foregroundStyle(.secondary) }
                 }.disabled(store.selected != nil || store.busy)
                 if !store.gatewayReady { Text("此服务器尚未启用新版账号与审批后端，见源码包中的部署说明。").foregroundStyle(.orange) }

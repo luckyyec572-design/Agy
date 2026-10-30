@@ -80,7 +80,8 @@ struct AGYMessage: Codable, Identifiable {
         for a in attachments ?? [] {
             guard let path = a.path else { continue }
             let url = URL(fileURLWithPath: path).absoluteString
-            if a.mime.hasPrefix("image/") { blocks.append(.object(["type": .string("image"), "url": .string(url)])) }
+            if a.mime == "inode/directory" { blocks.append(.object(["type": .string("text"), "text": .string("@ " + a.name + "/")])) }
+            else if a.mime.hasPrefix("image/") { blocks.append(.object(["type": .string("image"), "url": .string(url)])) }
             else { blocks.append(.object(["type": .string("text"), "text": .string("[\(a.name)](\(url))")])) }
         }
         return ChatMessage(id: id, value: .object(["role": .string(role), "content": .array(blocks)]))
@@ -125,7 +126,7 @@ struct AGYStatus: Decodable {
     var accountProfile: String?
     var capabilities: AGYCapabilities?
 }
-struct AGYCapabilities: Decodable { let separateEffort: Bool; let nativeApprovals: Bool; let artifacts: Bool }
+struct AGYCapabilities: Decodable { let separateEffort: Bool; let nativeApprovals: Bool; let artifacts: Bool; var fileBrowser: Bool?; var directoryMentions: Bool? }
 struct AGYModels: Decodable { let models: [AGYModel]; var families: [AGYModelFamily]? }
 struct AGYSessions: Decodable { let sessions: [AGYSession] }
 struct AGYCredentials: Codable {
@@ -142,4 +143,18 @@ struct AGYCredentials: Codable {
 enum AGYError: LocalizedError {
     case message(String)
     var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
+}
+
+struct AGYFileEntry: Codable, Identifiable {
+    let name: String
+    let path: String
+    let directory: Bool
+    let size: Int64
+    let modified: Double
+    var id: String { path }
+}
+struct AGYFileListing: Decodable {
+    let root: String
+    let path: String
+    let entries: [AGYFileEntry]
 }

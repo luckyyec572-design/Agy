@@ -102,6 +102,9 @@ class Gateway:
             raise Failure(400, "工作目录不存在")
         if not p.is_dir() or not any(p == r or r in p.parents for r in self.roots):
             raise Failure(403, "工作目录不在允许范围内")
+        if any(part in {".git", ".gemini", ".ssh", ".aws", ".codex", ".agents"}
+               for root in self.roots if p == root or root in p.parents for part in p.relative_to(root).parts):
+            raise Failure(403, "不能将凭据或内部配置目录作为工作区")
         return str(p)
 
     def models(self, refresh=False):
@@ -257,13 +260,18 @@ class Gateway:
         attachment_ids = body.get("attachments", [])
         if not isinstance(attachment_ids, list) or len(attachment_ids) > MAX_ATTACHMENTS or any(not isinstance(a, str) for a in attachment_ids) or len(set(attachment_ids)) != len(attachment_ids):
             raise Failure(400, "最多添加 8 个不同附件")
-        if not isinstance(prompt, str) or not (prompt.strip() or attachment_ids) or len(prompt.encode()) > 200 * 1024:
+        file_references = body.get("references", [])
+        if not isinstance(file_references, list) or len(file_references) > 8 or any(not isinstance(p, str) for p in file_references) or len(set(file_references)) != len(file_references):
+            raise Failure(400, "最多引用 8 个不同工作文件")
+        if not isinstance(prompt, str) or not (prompt.strip() or attachment_ids or file_references) or len(prompt.encode()) > 200 * 1024:
             raise Failure(400, "消息为空或过长")
         try:
             uuid.UUID(rid)
         except (ValueError, TypeError, AttributeError):
             raise Failure(400, "缺少有效请求编号")
         digest = hashlib.sha256((prompt + (json.dumps(attachment_ids) if attachment_ids else "")).encode()).hexdigest()
+        if file_references:
+            digest = hashlib.sha256((digest + json.dumps(file_references, ensure_ascii=False)).encode()).hexdigest()
         with self.lock:
             prior = self.db.execute("SELECT session,digest FROM requests WHERE id=?", (rid,)).fetchone()
             if prior:
@@ -277,14 +285,25 @@ class Gateway:
             attached = [self.attachment(sid, aid) for aid in attachment_ids]
             if sum(a["size"] for a in attached) > MAX_TOTAL:
                 raise Failure(413, "附件合计不能超过 50 MB")
-            references = "\n".join("- " + json.dumps(a["name"], ensure_ascii=False) + ": @" + a["path"] for a in attached)
+            referenced = []
+            for path in file_references:
+                is_directory = False
+                try:
+                    stream, name, size = self.open_file(sid, path, directory=True)
+                    is_directory = True
+                except Failure:
+                    stream, name, size = self.open_file(sid, path)
+                    with stream: pass
+                referenced.append({"id": path, "name": name, "path": path, "size": size,
+                                   "mime": "inode/directory" if is_directory else mimetypes.guess_type(name)[0] or "application/octet-stream"})
+            references = "\n".join(json.dumps({"name": a["name"], "path": a["path"], "type": "directory" if a["mime"] == "inode/directory" else "file"}, ensure_ascii=False) for a in attached + referenced)
             cli_prompt = prompt
-            if attached:
-                cli_prompt = (prompt or "请读取并分析这些附件。") + "\n\nUser-uploaded attachments (use the file/image reading tools to inspect their actual contents):\n" + references
-            s["messages"].append({"id": rid, "role": "user", "text": prompt, "attachments": [self.attachment_info(a) for a in attached]})
+            if attached or referenced:
+                cli_prompt = (prompt or "请查看这些引用的文件或文件夹。") + "\n\nReferenced files and directories (full paths identify the selected context; use reading tools as needed; directory references refer to the whole folder, not a preloaded archive):\n" + references
+            s["messages"].append({"id": rid, "role": "user", "text": prompt, "attachments": [self.attachment_info(a) for a in attached] + referenced})
             s["messages"].append({"id": str(uuid.uuid4()), "role": "assistant", "text": "", "tools": []})
             if s["name"] == "新会话":
-                s["name"] = prompt.strip()[:40] or attached[0]["name"][:40]
+                s["name"] = prompt.strip()[:40] or (attached + referenced)[0]["name"][:40]
             s["running"], s["error"], s["modified"] = True, "", time.time()
             # One transaction admits both the user message and its deduplication key.
             self.db.execute("INSERT INTO requests VALUES (?,?,?)", (rid, sid, digest))
@@ -446,27 +465,89 @@ class Gateway:
             self.save(s)
             return s
 
-    def open_file(self, sid, raw):
+    def file_root(self, sid=None, scope="workspace", cwd=None):
+        session = self.get(sid) if sid else None
+        workspace = Path(self.workspace(session["cwd"] if session else cwd))
+        if scope == "workspace": return workspace
+        if not session: raise Failure(400, "请先选择会话")
+        if scope == "uploads": return workspace/".agy-uploads"/sid
+        if scope == "artifacts" and self.profile_home and session["conversationID"]:
+            try: uuid.UUID(session["conversationID"])
+            except (ValueError, TypeError, AttributeError): raise Failure(403, "会话产物标识无效")
+            return self.profile_home/".gemini/antigravity-cli/brain"/session["conversationID"]
+        if scope == "artifacts": return None
+        raise Failure(400, "文件区域无效")
+
+    def list_files(self, sid=None, scope="workspace", path="", cwd=None):
+        import stat
+        relative = Path(path)
+        if relative.is_absolute() or ".." in relative.parts or "\x00" in path:
+            raise Failure(403, "目录不在允许范围内")
+        root = self.file_root(sid, scope, cwd)
+        result = {"root": str(root) if root else "", "path": str(relative) if str(relative) != "." else "", "entries": []}
+        if root is None: return result
+        descriptors = []
+        try:
+            anchor = root
+            prefix = ()
+            if scope == "uploads":
+                anchor = Path(self.workspace(self.get(sid)["cwd"]))
+                prefix = (".agy-uploads", sid)
+            elif scope == "artifacts":
+                anchor = self.profile_home
+                prefix = (".gemini", "antigravity-cli", "brain", self.get(sid)["conversationID"])
+            if any(part in {".git", ".gemini", ".ssh", ".aws", ".codex", ".agents"} for part in relative.parts):
+                raise Failure(403, "不能访问凭据或内部配置目录")
+            fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW); descriptors.append(fd)
+            for part in prefix + relative.parts:
+                fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd); descriptors.append(fd)
+            names = {}
+            if scope == "uploads":
+                with self.lock:
+                    names = {a["path"]: a["name"] for (raw,) in self.db.execute("SELECT data FROM attachments WHERE session=?", (sid,)) for a in [json.loads(raw)]}
+            entries = []
+            with os.scandir(fd) as iterator:
+                for entry in iterator:
+                    if len(entries) >= 5000: raise Failure(413, "目录超过 5000 项，请选择更小的目录")
+                    metadata = entry.stat(follow_symlinks=False)
+                    if not (stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)): continue
+                    # Credentials and gateway state must never be listed as work files.
+                    if entry.name in {".git", ".gemini", ".ssh", ".aws", ".codex", ".agents"}: continue
+                    full = root/relative/entry.name
+                    entries.append({"name": names.get(str(full), entry.name), "path": str(full), "directory": stat.S_ISDIR(metadata.st_mode),
+                                    "size": metadata.st_size, "modified": metadata.st_mtime})
+            result["entries"] = sorted(entries, key=lambda e: (not e["directory"], e["name"].casefold()))
+            return result
+        except FileNotFoundError:
+            if not relative.parts and scope != "workspace": return result
+            raise Failure(404, "目录不存在")
+        except OSError: raise Failure(403, "目录不可读或含有符号链接")
+        finally:
+            for fd in reversed(descriptors): os.close(fd)
+
+    def open_file(self, sid, raw, directory=False):
         s = self.get(sid)
         cwd = Path(self.workspace(s["cwd"]))
+        if not isinstance(raw, str) or "\x00" in raw or len(raw) > 8192:
+            raise Failure(400, "文件路径无效")
         requested = Path(raw)
         if ".." in requested.parts:
             raise Failure(403, "文件路径不能包含父目录跳转")
         target = requested if requested.is_absolute() else cwd / requested
         allowed = [cwd]
         if self.profile_home and s["conversationID"]:
-            allowed.append(self.profile_home/".gemini/antigravity-cli/brain"/s["conversationID"])
+            allowed.insert(0, self.file_root(sid, "artifacts"))
         target = Path(os.path.abspath(target))
         base, components = None, None
         for root in allowed:
-            if root in target.parents:
+            if root == target or root in target.parents:
                 base, components = root, target.relative_to(root).parts
                 break
             # macOS may spell the same root /var/... and /private/var/....
             # Resolve only a ROOT prefix, from outermost to innermost. Once
             # inside that boundary, preserve every child for O_NOFOLLOW.
             # Resolving target itself would silently accept workspace links.
-            for prefix in reversed(target.parents):
+            for prefix in reversed((target,) + tuple(target.parents)):
                 try:
                     canonical = prefix.resolve(strict=True)
                 except (OSError, RuntimeError):
@@ -480,12 +561,25 @@ class Gateway:
                     break
             if base is not None: break
         if base is None: raise Failure(403, "文件不在此会话的允许范围")
+        if any(part in {".git", ".gemini", ".ssh", ".aws", ".codex", ".agents"} for part in components):
+            raise Failure(403, "不能访问凭据或内部配置目录")
         descriptors = []
         try:
-            fd = os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW); descriptors.append(fd)
-            for part in components[:-1]:
+            anchor = base
+            prefix = ()
+            if base != cwd:
+                anchor = self.profile_home
+                prefix = base.relative_to(anchor).parts
+            fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW); descriptors.append(fd)
+            for part in prefix + components[:-1]:
                 fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd); descriptors.append(fd)
-            result = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            if directory:
+                if components:
+                    result = os.open(components[-1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    os.close(result)
+                return None, target.name, 0
+            if not components: raise Failure(400, "请选择普通文件下载")
+            result = os.open(components[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             import stat
             metadata = os.fstat(result)
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_FILE:
@@ -561,7 +655,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(200, {"name": "AGY", "version": 1, "roots": list(map(str, gateway.roots)),
                                           "defaultModel": gateway.default_model, "conversationScope": "gateway",
                                           "accountProfile": gateway.account_profile,
-                                          "capabilities": {"separateEffort": True, "nativeApprovals": gateway.review is not None, "artifacts": True}})
+                                          "capabilities": {"separateEffort": True, "nativeApprovals": gateway.review is not None, "artifacts": True, "fileBrowser": True, "directoryMentions": True}})
             if self.command == "GET" and path == "/v1/models":
                 models = gateway.models(refresh=query.get("refresh") == ["1"])
                 return self.respond(200, {"models": models, "families": catalog.families(models)})
@@ -576,6 +670,11 @@ class Handler(BaseHTTPRequestHandler):
             approval = re.fullmatch(r"/v1/sessions/([a-f0-9-]{36})/approvals/([a-f0-9-]{36})", path)
             if approval and self.command == "POST":
                 return self.respond(200, gateway.answer_approval(approval[1], approval[2], body.get("decision")))
+            if self.command == "GET" and path == "/v1/workspace":
+                return self.respond(200, gateway.list_files(cwd=query.get("cwd", [str(gateway.roots[0])])[0], path=query.get("path", [""])[0]))
+            listing = re.fullmatch(r"/v1/sessions/([a-f0-9-]{36})/entries", path)
+            if listing and self.command == "GET":
+                return self.respond(200, gateway.list_files(listing[1], query.get("scope", ["workspace"])[0], query.get("path", [""])[0]))
             artifact = re.fullmatch(r"/v1/sessions/([a-f0-9-]{36})/files", path)
             if artifact and self.command == "GET":
                 stream, name, size = gateway.open_file(artifact[1], query.get("path", [""])[0])

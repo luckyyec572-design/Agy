@@ -37,7 +37,7 @@ final class AGYExternalRedirectPolicy: NSObject, URLSessionTaskDelegate {
         // Match the mobile client identity used by the existing Pi app so the
         // origin's Browser Integrity Check accepts native API requests.
         let os = UIDevice.current.systemVersion.replacingOccurrences(of: ".", with: "_")
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.0"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0"
         request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS \(os) like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 AGY-iPhone/\(version)", forHTTPHeaderField: "User-Agent")
         if let body { request.httpBody = try JSONEncoder().encode(body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         return request
@@ -63,13 +63,13 @@ final class AGYExternalRedirectPolicy: NSObject, URLSessionTaskDelegate {
         try validate(response, data: data)
         return try JSONDecoder().decode(AGYAttachment.self, from: data)
     }
-    func download(_ path: String, sessionID: String) async throws -> URL {
+    func download(_ path: String, sessionID: String, name: String? = nil) async throws -> URL {
         guard !sessionID.isEmpty else { throw AGYError.message("请先选择会话") }
         var req = try request("sessions/\(sessionID)/files", query: ["path": path])
         req.setValue("*/*", forHTTPHeaderField: "Accept")
         let (temporary, response) = try await session.download(for: req)
         try validate(response)
-        return try protect(temporary, name: NativeFileRules.safeFilename(path))
+        return try protect(temporary, name: NativeFileRules.safeFilename(name ?? path))
     }
     private func protect(_ temporary: URL, name: String) throws -> URL {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("AGYPreviews/\(UUID().uuidString)")

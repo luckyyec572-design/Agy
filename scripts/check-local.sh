@@ -18,4 +18,6 @@ xcrun swiftc -parse-as-library Sources/NativeCore.swift Sources/NativeNetworking
 build/presentation
 xcrun swiftc -parse-as-library Sources/NativeAttachmentReader.swift Sources/NativePhotoEncoding.swift Tests/NativeAttachmentTests.swift -o build/attachments
 build/attachments
+xcrun swiftc -parse-as-library Sources/AGYFilePresentation.swift Tests/AGYFilePresentationTests.swift -o build/files
+build/files
 echo "Local executable checks passed; use bash scripts/package.sh for the separate iPhone archive. No Actions are invoked."

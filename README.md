@@ -1,6 +1,14 @@
+# AGY iPhone 1.3.0 · 文件与目录引用
+
+本版新增原生“文件”页：浏览工作文件、从文件/相册上传、下载并预览产物、保存到 iPhone 文件 App。输入 `@` 或点击文件行的 `@`，可引用文件或整个文件夹。手机只显示相对路径，不需要输入服务器路径。目录引用保留整个文件夹的路径，AGY 按需读取，不预先展开全部内容。
+
+需配套部署本包网关；旧网关会提示升级。工作区沿用部署时的允许目录，用户可通过文件夹浏览选择新会话的项目。上传文件集中存放在会话上传区，上传本身不会发送任务。下载单个文件上限 25 MiB；目前没有目录 ZIP 下载、文件删除/移动功能。
+
+本次只交付源码，不推送、不触发 Actions、不切换线上账号或重启线上网关。Linux 网关回归及 Swift 语法检查见 `VALIDATION.md`；本机没有 Xcode，未生成或验证 IPA。
+
 # AGY for iPhone
 
-独立的 SwiftUI 原生 Antigravity CLI 客户端，沿用 [Pi iPhone](https://github.com/ddyec/Pi-iPhone) 的消息展示与界面基础。iOS 17+、仅 iPhone，SVG 原生预览使用固定 SwiftDraw 0.29.0。Bundle ID：`com.ddyec.agy-iphone`，可与 Pi 同时安装。当前源码版本 1.2.0 / build 4。
+独立的 SwiftUI 原生 Antigravity CLI 客户端，沿用 [Pi iPhone](https://github.com/ddyec/Pi-iPhone) 的消息展示与界面基础。iOS 17+、仅 iPhone，SVG 原生预览使用固定 SwiftDraw 0.29.0。Bundle ID：`com.ddyec.agy-iphone`，可与 Pi 同时安装。当前源码版本 1.3.0 / build 5。
 
 App 图标、登录页、欢迎页和消息标识使用 [Google 官方 Antigravity Press Assets](https://antigravity.google/press) 全彩原图；来源与打包说明见 `Brand/README.md`。
 

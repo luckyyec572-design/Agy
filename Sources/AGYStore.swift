@@ -16,6 +16,7 @@ struct AGYDraftAttachment: Identifiable {
     @Published var models: [AGYModel] = []
     @Published var families: [AGYModelFamily] = []
     @Published var approvalMode = "review"
+    @Published var fileBrowserReady = false
     @Published var gatewayReady = false
     @Published var approvalBusy = false
     @Published var accountProfile = ""
@@ -28,6 +29,7 @@ struct AGYDraftAttachment: Identifiable {
     @Published var connection = "尚未连接"
     @Published var pending: PendingSend?
     @Published var attachments: [AGYDraftAttachment] = []
+    @Published var references: [AGYFileEntry] = []
     @Published var importing = false
     @Published var uploadProgress = ""
     @Published var limits: AGYLimits?
@@ -46,8 +48,9 @@ struct AGYDraftAttachment: Identifiable {
         let requestID: String
         let text: String
         var attachments: [String]?
+        var references: [String]?
     }
-    var canSend: Bool { connected && gatewayReady && !busy && !importing && selected?.running != true && pending == nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
+    var canSend: Bool { connected && gatewayReady && (references.isEmpty || fileBrowserReady) && !busy && !importing && selected?.running != true && pending == nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty || !references.isEmpty) }
     var currentFamily: AGYModelFamily? { families.first { $0.variants.contains { $0.id == model } } }
     var baseModel: String { currentFamily?.id ?? selected?.baseModel ?? model }
     var effort: String { currentFamily?.variants.first { $0.id == model }?.effort ?? selected?.effort ?? "" }
@@ -59,6 +62,7 @@ struct AGYDraftAttachment: Identifiable {
     }
     init() {
         draft = cache.read("draft-new", as: String.self) ?? ""
+        references = cache.read("references-draft-new", as: [AGYFileEntry].self) ?? []
         sessions = cache.read("sessions", as: [AGYSession].self) ?? []
         if let data = SecureStore.read("pending-send") { pending = try? JSONDecoder().decode(PendingSend.self, from: data) }
     }
@@ -79,10 +83,11 @@ struct AGYDraftAttachment: Identifiable {
             guard status.version == 1, !available.models.isEmpty else { throw AGYError.message("服务器协议不兼容或没有可用模型") }
             roots = status.roots; cwd = roots.first ?? ""; models = available.models
             families = available.families ?? []
+            fileBrowserReady = status.capabilities?.fileBrowser == true && status.capabilities?.directoryMentions == true
             gatewayReady = status.capabilities?.nativeApprovals == true && status.capabilities?.separateEffort == true
             let profile = credentials.url.absoluteString + "#" + (status.accountProfile ?? "legacy")
             if UserDefaults.standard.string(forKey: "activeAccountProfile") != profile {
-                cache.clear(); sessions = []; selected = nil; draft = ""; attachments = []; pending = nil; limits = nil
+                cache.clear(); sessions = []; selected = nil; draft = ""; attachments = []; references = []; pending = nil; limits = nil
                 SecureStore.delete("pending-send"); attachmentContext = UUID()
                 UserDefaults.standard.removeObject(forKey: "draft")
             }
@@ -108,7 +113,7 @@ struct AGYDraftAttachment: Identifiable {
     }
     func select(_ id: String) async {
         let switching = selected?.id != id
-        if switching { saveDraft(); attachmentContext = UUID(); attachments = []; importing = false }
+        if switching { saveDraft(); attachmentContext = UUID(); attachments = []; references = []; importing = false }
         selectionEpoch = UUID(); let token = selectionEpoch, account = epoch
         streamTask?.cancel()
         guard let api else { return }
@@ -120,7 +125,10 @@ struct AGYDraftAttachment: Identifiable {
             guard token == selectionEpoch, epoch == account else { return }
             selected = s; cwd = s.cwd; model = s.model; mode = s.mode
             approvalMode = s.approvalMode ?? "legacy"
-            if switching { draft = cache.read(draftKey, as: String.self) ?? "" }
+            if switching {
+                draft = cache.read(draftKey, as: String.self) ?? ""
+                references = cache.read("references-" + draftKey, as: [AGYFileEntry].self) ?? []
+            }
             cache.write(s, key: "session-" + id)
             reconcilePending(s)
             watch(id)
@@ -131,14 +139,37 @@ struct AGYDraftAttachment: Identifiable {
         saveDraft(); selectionEpoch = UUID(); streamTask?.cancel(); selected = nil; error = nil; connection = "已就绪"
         draft = cache.read(draftKey, as: String.self) ?? ""
         if approvalMode == "legacy" { approvalMode = "review" }
-        attachmentContext = UUID(); attachments = []; importing = false
+        attachmentContext = UUID(); attachments = []; references = cache.read("references-" + draftKey, as: [AGYFileEntry].self) ?? []; importing = false
     }
     private func reconcilePending(_ s: AGYSession) {
         if let p = pending, p.sessionID == s.id, s.messages?.contains(where: { $0.id == p.requestID }) == true {
             if draft == p.text { draft = ""; saveDraft() }
+            references.removeAll { p.references?.contains($0.path) == true }; saveDraft()
             pending = nil; SecureStore.delete("pending-send")
             attachments.removeAll { item in p.attachments?.contains(item.uploaded?.id ?? "") == true }
         }
+    }
+    func reference(_ entry: AGYFileEntry) {
+        guard pending == nil, !busy else { return }
+        guard !references.contains(where: { $0.path == entry.path }) else {
+            if draft.hasSuffix("@") { draft.removeLast(); saveDraft() }; tab = 0; return
+        }
+        guard references.count < 8 else { error = "最多引用 8 个工作文件"; return }
+        if draft.hasSuffix("@") { draft.removeLast() }
+        references.append(entry); saveDraft(); tab = 0
+    }
+    func prepareFileSession() async throws -> String {
+        guard let api, gatewayReady, !busy, pending == nil else { throw AGYError.message("请先连接新版网关，并等待当前操作完成") }
+        if let id = selected?.id { return id }
+        busy = true
+        let account = epoch, selection = selectionEpoch
+        defer { if account == epoch { busy = false } }
+        let session: AGYSession = try await api.json("sessions", method: "POST", body: .object(["cwd": .string(cwd), "baseModel": .string(baseModel), "effort": .string(effort), "mode": .string(mode), "approvalMode": .string(approvalMode)]))
+        guard account == epoch, selection == selectionEpoch else { throw CancellationError() }
+        selected = session; saveDraft()
+        cache.remove("draft-new"); cache.remove("references-draft-new")
+        await reload()
+        return session.id
     }
     func send() async {
         guard canSend, let api else { return }
@@ -150,7 +181,8 @@ struct AGYDraftAttachment: Identifiable {
             if selected == nil {
                 let s: AGYSession = try await api.json("sessions", method: "POST", body: .object(["cwd": .string(cwd), "baseModel": .string(baseModel), "effort": .string(effort), "mode": .string(mode), "approvalMode": .string(approvalMode)]))
                 guard epoch == account, selection == selectionEpoch else { return }
-                selected = s
+                selected = s; saveDraft()
+                cache.remove("draft-new"); cache.remove("references-draft-new")
             }
             guard let id = selected?.id else { return }
             for i in attachments.indices {
@@ -162,14 +194,14 @@ struct AGYDraftAttachment: Identifiable {
                 }
             }
             uploadProgress = ""
-            let p = PendingSend(sessionID: id, requestID: UUID().uuidString.lowercased(), text: textToSend, attachments: attachments.compactMap { $0.uploaded?.id })
+            let p = PendingSend(sessionID: id, requestID: UUID().uuidString.lowercased(), text: textToSend, attachments: attachments.compactMap { $0.uploaded?.id }, references: references.map(\.path))
             guard SecureStore.write(try JSONEncoder().encode(p), account: "pending-send") else { throw AGYError.message("无法保存发送编号，消息尚未发送。") }
             pending = p
             try await submit(p, api: api, account: account)
         } catch { if epoch == account { uploadProgress = ""; self.error = pending == nil ? error.localizedDescription : "发送结果待确认。请核对会话，或使用相同编号重试。\n" + error.localizedDescription } }
     }
     private func submit(_ p: PendingSend, api: AGYAPI, account: UUID) async throws {
-        let s: AGYSession = try await api.json("sessions/\(p.sessionID)/messages", method: "POST", body: .object(["text": .string(p.text), "requestID": .string(p.requestID), "attachments": .array((p.attachments ?? []).map { .string($0) })]))
+        let s: AGYSession = try await api.json("sessions/\(p.sessionID)/messages", method: "POST", body: .object(["text": .string(p.text), "requestID": .string(p.requestID), "attachments": .array((p.attachments ?? []).map { .string($0) }), "references": .array((p.references ?? []).map { .string($0) })]))
         guard epoch == account else { return }
         reconcilePending(s)
         if selected?.id == s.id { selected = s; watch(s.id) }
@@ -297,12 +329,15 @@ struct AGYDraftAttachment: Identifiable {
         if phase == .background { foreground = false; streamTask?.cancel(); connection = "后台已暂停同步" }
         if phase == .active { foreground = true; if let id = selected?.id { Task { await select(id) } } else if connected { Task { await reload() } } }
     }
-    func saveDraft() { cache.write(draft, key: draftKey) }
+    func saveDraft() {
+        cache.write(draft, key: draftKey)
+        cache.write(references, key: "references-" + draftKey)
+    }
     func disconnect() {
         epoch = UUID(); selectionEpoch = UUID(); streamTask?.cancel(); api?.invalidate(); api = nil
         SecureStore.delete("connection"); SecureStore.delete("pending-send"); pending = nil
         connected = false; busy = false; sessions = []; selected = nil; draft = ""; saveDraft(); error = nil; connection = "尚未连接"
-        attachmentContext = UUID(); attachments = []; importing = false; uploadProgress = ""; limits = nil; limitsLoading = false; modelsLoading = false
-        cache.clear(); gatewayReady = false; families = []; accountProfile = ""; UserDefaults.standard.removeObject(forKey: "activeAccountProfile")
+        attachmentContext = UUID(); attachments = []; references = []; importing = false; uploadProgress = ""; limits = nil; limitsLoading = false; modelsLoading = false
+        cache.clear(); fileBrowserReady = false; gatewayReady = false; families = []; accountProfile = ""; UserDefaults.standard.removeObject(forKey: "activeAccountProfile")
     }
 }

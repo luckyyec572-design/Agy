@@ -25,3 +25,8 @@ Restriction 的名称用于表达逐项审批体验；官方当前文档称 Requ
 文档依据：[AGY 权限](https://antigravity.google/docs/permissions)、[CLI 设置](https://antigravity.google/docs/settings)、[官方 Hooks](https://antigravity.google/docs/hooks)、[无头协议](https://antigravity.google/docs/cli/headless/)。
 
 当前交付是源码包。Linux 本地后端回归、隔离 CLI 实测及 Swift 语法扫描已执行；没有 Xcode，未做本版 iPhone 归档、模拟器或真机验收。
+
+
+## 1.3.0 文件功能补充
+
+参考 Pi `NativeFiles.swift` 的目录浏览、搜索、排序、隐藏项开关、上传、Quick Look/保存/分享体验，AGY 使用自己的认证和会话 API，未照搬 PI 文件 RPC。新增“工作区 / 已上传 / AGY 产物”入口，以及 `@` 文件与整个文件夹引用。UI 显示相对路径，网关向 headless AGY 提供实际路径；权限仍沿用 AGY 自己的审批设置。PI 的新建目录、删除和移动未在 AGY 虚构实现。
